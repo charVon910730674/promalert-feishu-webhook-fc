@@ -11,10 +11,21 @@ services:
       APP_ENV: "prod"
       APP_PORT: "8080"
       APP_HOST: "0.0.0.0"
-      APP_FS_WEBHOOK: "https://open.feishu.cn/open-apis/bot/v2/hook/50xxx-xxxxxxxx"
-      APP_FS_SECRET: "飞书自定义机器人安全设置中的签名校验秘钥"
-      # post 代表富文本,interactive 表示消息卡片,value值请用英文状态下的 双引号 包裹
-      APP_FS_ALERT_TYPE: "可选值为post和interactive"
+
+      # ===== 机器人配置(三种方式, 按优先级选择其一) =====
+      # 方式一(推荐, 多机器人): 挂载 JSON 配置文件, 结构见 bots.json.example
+      APP_FS_BOTS_FILE: "/data/feishu-webhook/bots.json"
+      # 方式二(少量机器人): 直接把 JSON 写在环境变量里
+      # APP_FS_BOTS: '[{"name":"ops","webhook":"https://open.feishu.cn/open-apis/bot/v2/hook/xxx","secret":"签名密钥","alert_type":"interactive","default":true}]'
+      # 方式三(兼容旧版单机器人):
+      # APP_FS_WEBHOOK: "https://open.feishu.cn/open-apis/bot/v2/hook/50xxx-xxxxxxxx"
+      # APP_FS_SECRET: "飞书自定义机器人安全设置中的签名校验秘钥"
+      # APP_FS_ALERT_TYPE: "post"
+
+      # true = 每条告警广播给所有机器人; false(默认) = 按告警标签 feishu_bot 路由, 无标签走 default 机器人
+      APP_FS_ROUTE_ALL: "false"
+    volumes:
+      - ./bots.json:/data/feishu-webhook/bots.json:ro
     networks:
       - feishu-webhook
 

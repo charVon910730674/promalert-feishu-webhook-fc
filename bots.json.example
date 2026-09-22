@@ -1,0 +1,21 @@
+[
+  {
+    "name": "ops",
+    "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/11111111-2222-3333-4444-555555555555",
+    "secret": "飞书群机器人A的签名校验密钥",
+    "alert_type": "interactive",
+    "default": true
+  },
+  {
+    "name": "dev",
+    "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/66666666-7777-8888-9999-000000000000",
+    "secret": "飞书群机器人B的签名校验密钥",
+    "alert_type": "post"
+  },
+  {
+    "name": "dba",
+    "webhook": "https://open.feishu.cn/open-apis/bot/v2/hook/aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "secret": "",
+    "alert_type": "interactive"
+  }
+]

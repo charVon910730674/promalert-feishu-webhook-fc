@@ -1,0 +1,5 @@
+[
+  {"name": "ops", "webhook": "http://127.0.0.1:9999/ops", "secret": "secret-ops", "alert_type": "interactive", "default": true},
+  {"name": "dev", "webhook": "http://127.0.0.1:9999/dev", "secret": "secret-dev", "alert_type": "post"},
+  {"name": "noSign", "webhook": "http://127.0.0.1:9999/nosign", "secret": "", "alert_type": "post"}
+]

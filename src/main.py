@@ -4,14 +4,16 @@
 # -*- CreateTime  :  2023/03/15 09:55:22
 # -*- Author      :  Allen_Jol
 # -*- FileName    :  main.py
+# -*- Desc        :  Prometheus Alertmanager -> 飞书自定义机器人 webhook(支持多机器人)
 # *******************************************
 
 import sys
 import json
-import requests
-import arrow
 import logging
 import datetime
+
+import arrow
+import requests
 import urllib3
 from requests.adapters import HTTPAdapter
 from flask import Flask, request, jsonify
@@ -27,129 +29,284 @@ app = Flask(__name__)
 # 加载配置文件
 app.config.from_object("config")
 
+BOTS = app.config.get("APP_FS_BOTS") or []
+ROUTE_ALL = app.config.get("APP_FS_ROUTE_ALL", False)
+
 
 @app.before_first_request
 def before_first_request():
     app.logger.setLevel(logging.INFO)
 
 
-@app.route('/healthz', methods=['GET'])
+def _pick_message(alert):
+    """从 annotations 里取告警正文"""
+    annotations = alert.get("annotations") or {}
+    if annotations.get("message") is not None:
+        return annotations.get("message")
+    if annotations.get("description") is not None:
+        return annotations.get("description")
+    app.logger.error("Cannot get any alert info from annotations.message/description")
+    return "null"
+
+
+def _fmt_time(value):
+    if not value:
+        return "-"
+    try:
+        return arrow.get(value).to("Asia/Shanghai").format("YYYY-MM-DD HH:mm:ss")
+    except Exception:
+        return "-"
+
+
+def _bots_by_name():
+    return {bot["name"]: bot for bot in BOTS}
+
+
+def _default_bots():
+    default = [bot for bot in BOTS if bot.get("default")]
+    return default or BOTS[:1]
+
+
+def _select_bots(bot_label):
+    """按告警标签 feishu_bot 选择目标机器人
+
+    - ROUTE_ALL=true            -> 全部机器人
+    - 标签值为 all / *          -> 全部机器人
+    - 标签值为逗号分隔的多个名字 -> 命中的机器人
+    - 标签为空 / 名字都不存在    -> 默认机器人(标记 default 的, 否则第一个)
+    """
+    if ROUTE_ALL:
+        return list(BOTS)
+    if bot_label:
+        value = str(bot_label).strip()
+        if value in ("all", "*"):
+            return list(BOTS)
+        wanted = [x.strip() for x in value.split(",") if x.strip()]
+        mapping = _bots_by_name()
+        selected = [mapping[name] for name in wanted if name in mapping]
+        unknown = [name for name in wanted if name not in mapping]
+        if unknown:
+            app.logger.warning("Unknown bot name(s) in label feishu_bot: %s", unknown)
+        if selected:
+            return selected
+    return _default_bots()
+
+
+def build_payload(alert, bot):
+    """根据告警内容和机器人配置构造飞书消息体"""
+    labels = alert.get("labels") or {}
+    alertname = labels.get("alertname", "unknown")
+    severity = labels.get("severity", "unknown")
+    instance = labels.get("instance", "unknown")
+    status = alert.get("status", "")
+    message = _pick_message(alert)
+
+    title = "平台监控告警通知: %s" % alertname
+    warning_status = "当前状态: %s \n" % status
+    warning_name = "告警名称: %s \n" % alertname
+    warning_level = severity
+    warning_level_text = "告警等级: %s \n" % severity
+    warning_instance = "告警实例: %s \n" % instance
+    warning_info = "告警信息: %s" % str(message).replace(",", "\n").replace(":", ":  ")
+    warning_end_time = "结束时间: %s \n" % _fmt_time(alert.get("endsAt"))
+    warning_start_time = "告警时间: %s \n" % _fmt_time(alert.get("startsAt"))
+
+    now_time = datetime.datetime.now().replace(microsecond=0)
+    try:
+        start_time_struct = datetime.datetime.strptime(_fmt_time(alert.get("startsAt")), "%Y-%m-%d %H:%M:%S")
+        warning_last_time = "持续时间: %s \n" % (now_time - start_time_struct)
+    except Exception:
+        warning_last_time = "持续时间: - \n"
+
+    timestamp = int(datetime.datetime.now().timestamp())
+    secret = bot.get("secret") or ""
+    sign = gen_sign.gen_sign(timestamp, secret) if secret else None
+
+    alert_type = bot.get("alert_type", "post")
+
+    if alert_type == "interactive":
+        card_title = "%s告警通知" % warning_level
+        send_data = {
+            "msg_type": "interactive",
+            "timestamp": timestamp,
+            "card": {
+                "config": {"wide_screen_mode": True},
+                "elements": [
+                    {
+                        "tag": "div",
+                        "text": {"tag": "plain_text", "content": warning_name, "lines": 1},
+                        "fields": [
+                            {"text": {"tag": "lark_md", "content": warning_instance}},
+                            {"text": {"tag": "lark_md", "content": warning_info}},
+                            {"text": {"tag": "lark_md", "content": warning_start_time}},
+                            {
+                                "text": {
+                                    "tag": "lark_md",
+                                    "content": warning_last_time if status == "firing" else warning_end_time,
+                                }
+                            },
+                            {
+                                "text": {
+                                    "tag": "lark_md",
+                                    "content": "<at id=all></at>" if status == "firing" and warning_level == "P0" else "",
+                                }
+                            },
+                        ],
+                    }
+                ],
+                "header": {
+                    "template": "red"
+                    if status == "firing" and warning_level == "P0"
+                    else "orange"
+                    if status == "firing" and warning_level == "P1"
+                    else "yellow"
+                    if status == "firing"
+                    else "green",
+                    "title": {
+                        "content": card_title if status == "firing" else "告警恢复",
+                        "tag": "plain_text",
+                    },
+                },
+            },
+        }
+    else:
+        # 默认 post(富文本)
+        send_data = {
+            "timestamp": timestamp,
+            "msg_type": "post",
+            "content": {
+                "post": {
+                    "zh_cn": {
+                        "title": title,
+                        "content": [
+                            [
+                                {"tag": "text", "text": warning_instance},
+                                {"tag": "text", "text": warning_start_time},
+                                {"tag": "text", "text": warning_end_time},
+                                {"tag": "text", "text": warning_level_text},
+                                {"tag": "text", "text": warning_info},
+                                {"tag": "text", "text": warning_status},
+                            ]
+                        ],
+                    }
+                }
+            },
+        }
+
+    if sign:
+        send_data["sign"] = sign
+    return send_data
+
+
+def _send_to_bot(bot, send_data):
+    headers = {"Content-Type": "application/json; charset=utf-8"}
+    # 利用 requests 封装好的方法来设置 http 请求的重试次数
+    session = requests.Session()
+    session.mount("http://", HTTPAdapter(max_retries=3))
+    session.mount("https://", HTTPAdapter(max_retries=3))
+    try:
+        resp = session.post(
+            bot["webhook"],
+            data=json.dumps(send_data),
+            headers=headers,
+            timeout=5,
+            verify=False,
+        )
+        # 打印飞书返回体, 便于排查(如 code!=0 表示签名/频率/被限流等问题)
+        app.logger.info(
+            "Sent to bot '%s' -> HTTP %s body=%s",
+            bot["name"],
+            resp.status_code,
+            resp.text[:300].replace("\n", " "),
+        )
+        return resp
+    except requests.exceptions.RequestException as e:
+        app.logger.error("Send to bot '%s' failed: %s", bot["name"], e)
+        return None
+
+
+@app.route("/healthz", methods=["GET"])
 def healch_check():
     current_time = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     data = {"time": current_time, "status": "OK", "status_code": 200}
     return jsonify(data)
 
 
-@app.route('/send', methods=['POST'])
-def send():
-    headers = {'Content-Type': 'application/json; charset=utf-8'}
-    feishu_webhook_url = app.config.get("APP_FS_WEBHOOK")
-    feishu_webhook_srt = app.config.get("APP_FS_SECRET")
-    feishu_alert_type = app.config.get("APP_FS_ALERT_TYPE")
+@app.route("/bots", methods=["GET"])
+def list_bots():
+    """列出已加载的机器人(不返回签名密钥, webhook 做打码处理)"""
 
-    if feishu_webhook_url == None or feishu_webhook_srt == None:
-        app.logger.error(
-            "Please set system environment variable and try again, Require: (APP_FS_WEBHOOK、APP_FS_SECRET)"
-        )
-        sys.exit(1)
+    def mask(url):
+        url = url or ""
+        if len(url) <= 12:
+            return "****"
+        return url[:-8] + "********"
 
-    # 获取时间戳和签名
-    timestamp = int(datetime.datetime.now().timestamp())
-    sign = gen_sign.gen_sign(timestamp, feishu_webhook_srt)
-
-    data = json.loads(request.data)
-    app.logger.info(data)
-    alerts = data['alerts']
-
-    for output in alerts:
-        try:
-            message = output['annotations']['message']
-        except KeyError:
-            try:
-                message = output['annotations']['description']
-            except KeyError:
-                message = 'null'
-                app.logger.error(f"Cnt not get any alert info, message is {message}")
-
-        title = f"平台监控告警通知: {output['labels']['alertname']}"
-        warning_status = "当前状态: %s \n" % output['status']
-        warning_isfiring = output['status']
-        warning_name = "告警名称: %s \n" % output['labels']['alertname']
-        warning_level = output['labels']['severity']
-        warning_level_text = "告警等级: %s \n" % output['labels']['severity']
-        warning_instance = "告警实例: %s \n" % output['labels']['instance']
-        warning_info = "告警信息: %s" % message.replace(',', '\n').replace(':', ':  ')
-        warning_end_time = "结束时间: %s \n" % arrow.get(output['endsAt']).to('Asia/Shanghai').format('YYYY-MM-DD HH:mm:ss')
-        warning_start_time = "告警时间: %s \n" % arrow.get(output['startsAt']).to('Asia/Shanghai').format('YYYY-MM-DD HH:mm:ss')
-        now_time = str(datetime.datetime.now().replace(microsecond=0))
-        now_time_struct = datetime.datetime.strptime(now_time, "%Y-%m-%d %H:%M:%S")
-        start_time = arrow.get(output['startsAt']).to('Asia/Shanghai').format('YYYY-MM-DD HH:mm:ss')
-        start_time_struct = datetime.datetime.strptime(start_time, "%Y-%m-%d %H:%M:%S")
-        last_time = now_time_struct - start_time_struct
-        warning_last_time = "持续时间: %s \n" % last_time
-
-        if feishu_alert_type == "post":
-            send_data = {
-                "timestamp": timestamp,
-                "sign": sign,
-                "msg_type": "post",
-                "content": {
-                    "post": {
-                        "zh_cn": {
-                            "title": title,
-                            "content": [
-                                [
-                                    {"tag": "text", "text": warning_instance},
-                                    {"tag": "text", "text": warning_start_time},
-                                    {"tag": "text", "text": warning_end_time},
-                                    {"tag": "text", "text": warning_level_text},
-                                    {"tag": "text", "text": warning_info},
-                                    {"tag": "text", "text": warning_status},
-                                ]
-                            ],
-                        }
-                    }
-                },
-            }
-        elif feishu_alert_type == "interactive":
-            title = f"%s告警通知" %warning_level
-            send_data = {
-                "msg_type": "interactive",
-                "timestamp": timestamp,
-                "sign": sign,
-                "card": {
-                    "config": {"wide_screen_mode": True},
-                    "elements": [
-                        {"tag": "div","text": {"tag": "plain_text","content": warning_name,"lines": 1},
-                        "fields": [
-                            {"text": {"tag": "lark_md","content": warning_instance,}},
-                            {"text": {"tag": "lark_md","content": warning_info,}},
-                            {"text": {"tag": "lark_md","content": warning_start_time,}},
-                            {"text": {"tag": "lark_md","content": warning_last_time if warning_isfiring == 'firing' else warning_end_time,}},
-                            {"text": {"tag": "lark_md","content": "<at id=all></at>" if warning_isfiring == 'firing' and warning_level == 'P0' else ""}}
-                            ]
-                        }
-                    ],
-                    "header": {
-                        "template": 'red' if warning_isfiring == 'firing' and warning_level == 'P0' else 'orange' if warning_isfiring == 'firing' and warning_level == 'P1' else 'yellow' if warning_isfiring == 'firing' else 'green',
-                        "title": {"content": title if warning_isfiring == 'firing' else '告警恢复',"tag": "plain_text"}
-                    }
+    return jsonify(
+        {
+            "route_all": ROUTE_ALL,
+            "count": len(BOTS),
+            "bots": [
+                {
+                    "name": bot["name"],
+                    "default": bool(bot.get("default")),
+                    "alert_type": bot.get("alert_type"),
+                    "sign": bool(bot.get("secret")),
+                    "webhook": mask(bot.get("webhook")),
                 }
-            }
-
-        try:
-            # 利用 requests封装好的方法来设置http请求的重试次数
-            session = requests.Session()
-            session.mount('http://', HTTPAdapter(max_retries=3))
-            session.mount('https://', HTTPAdapter(max_retries=3))
-            send_data = json.dumps(send_data)
-            session.post(feishu_webhook_url, data=send_data, headers=headers, timeout=5, verify=False)
-        except requests.exceptions.RequestException as e:
-            app.logger.error(e)
-
-    return 'ok'
+                for bot in BOTS
+            ],
+        }
+    )
 
 
-if __name__ == '__main__':
+@app.route("/send", methods=["POST"])
+@app.route("/send/<bot_name>", methods=["POST"])
+def send(bot_name=None):
+    if not BOTS:
+        return jsonify({"status": "error", "msg": "no feishu bot configured"}), 500
+
+    raw = request.data or b""
+    try:
+        data = json.loads(raw) if raw else {}
+    except json.JSONDecodeError as e:
+        app.logger.error("Invalid json body: %s", e)
+        return jsonify({"status": "error", "msg": "invalid json body"}), 400
+
+    # 指定了 /send/<bot_name> 则只发给该机器人
+    fixed_target = None
+    if bot_name is not None:
+        mapping = _bots_by_name()
+        if bot_name not in mapping:
+            return (
+                jsonify({"status": "error", "msg": "unknown bot '%s'" % bot_name, "bots": list(mapping)}),
+                404,
+            )
+        fixed_target = [mapping[bot_name]]
+
+    alerts = data.get("alerts") or []
+    app.logger.info("Receive %d alert(s) from %s", len(alerts), request.remote_addr)
+
+    sent = 0
+    for alert in alerts:
+        label = (alert.get("labels") or {}).get("feishu_bot")
+        targets = fixed_target if fixed_target is not None else _select_bots(label)
+        # 同一条告警对相同 (alert_type, secret) 只构造一次消息体
+        cache = {}
+        for bot in targets:
+            key = (bot.get("alert_type", "post"), bot.get("secret", ""))
+            if key not in cache:
+                cache[key] = build_payload(alert, bot)
+            _send_to_bot(bot, cache[key])
+            sent += 1
+
+    return jsonify({"status": "ok", "alerts": len(alerts), "sent": sent}), 200
+
+
+if __name__ == "__main__":
     app.logger.info("Prometheus Python webhook start...")
-    app.run(host=app.config.get("APP_HOST"), port=int(app.config.get("APP_PORT")), debug=app.config.get("DEBUG"))
+    app.run(
+        host=app.config.get("APP_HOST"),
+        port=int(app.config.get("APP_PORT")),
+        debug=app.config.get("DEBUG"),
+    )
