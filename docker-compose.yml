@@ -24,6 +24,9 @@ services:
 
       # true = 每条告警广播给所有机器人; false(默认) = 按告警标签 feishu_bot 路由, 无标签走 default 机器人
       APP_FS_ROUTE_ALL: "false"
+
+      # 同一条告警(相同 labels+status)最多发送次数, 超过后丢弃; 0 或负数表示不限制
+      APP_FS_MAX_DUPLICATES: "2"
     volumes:
       - ./bots.json:/data/feishu-webhook/bots.json:ro
     networks:

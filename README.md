@@ -88,11 +88,23 @@ Prometheus 规则里打标签示例：
     feishu_bot: ops      # 决定推到哪个飞书群
 ```
 
+## 告警去重（限次）
+
+同一条告警（相同 `labels` + `status`）最多发送 N 次，超过后直接丢弃，避免 Alertmanager 的 `repeat_interval` 反复刷屏。
+
+- 环境变量 `APP_FS_MAX_DUPLICATES`，默认 `2`；设为 `0` 或负数表示不限制。
+- 计数保存在进程内存，容器重启后清零。
+- `POST /send` 返回体新增 `skipped` 字段，表示本次被去重丢弃的告警条数。
+
 ## 接口
 
-- `POST /send` / `POST /send/<bot_name>`：Alertmanager webhook 入口
+- `POST /send` / `POST /send/<bot_name>`：Alertmanager webhook 入口（返回 `alerts` / `sent` / `skipped`）
 - `GET /bots`：查看已加载机器人（密钥不返回，webhook 打码）
 - `GET /healthz`：健康检查
+
+## 说明
+
+仓库内示例中的 webhook、secret、IP、路径均为占位符，请替换为你自己的配置。
 
 ## 构建镜像
 

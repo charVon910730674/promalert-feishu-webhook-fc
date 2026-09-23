@@ -1,10 +1,11 @@
 #!/bin/bash
 # 多机器人功能测试: 在容器里跑 flask app + 假飞书端点, 从宿主断言
 set -u
-IMAGE=docker.m.daocloud.io/library/python:3.11-slim
+IMAGE=python:3.11-slim
 NAME=fwtest
-SRC=/root/promalert-feishu-webhook
-CAP=/root/fw_capture
+HERE="$(cd "$(dirname "$0")/.." && pwd)"   # 仓库根目录
+SRC=$HERE
+CAP=$(mktemp -d)
 PASS=0; FAIL=0
 
 cleanup() { docker rm -f $NAME >/dev/null 2>&1; }
@@ -17,7 +18,7 @@ docker run -d --name $NAME \
   -p 127.0.0.1:18080:8080 \
   -e APP_ENV=dev -e APP_HOST=0.0.0.0 -e APP_PORT=8080 \
   -e APP_FS_BOTS_FILE=/data/feishu-webhook/tests/bots.test.json \
-  $IMAGE bash -c "pip install -q -r /data/feishu-webhook/src/requirements.txt -i https://pypi.tuna.tsinghua.edu.cn/simple && cd /data/feishu-webhook/src && (python /data/feishu-webhook/tests/capture_server.py >/tmp/cap.log 2>&1 &) && sleep 1 && python main.py" >/dev/null
+  $IMAGE bash -c "pip install -q -r /data/feishu-webhook/src/requirements.txt && cd /data/feishu-webhook/src && (python /data/feishu-webhook/tests/capture_server.py >/tmp/cap.log 2>&1 &) && sleep 1 && python main.py" >/dev/null
 
 echo "== 等待服务就绪(装依赖+启动) =="
 for i in $(seq 1 90); do
@@ -81,9 +82,9 @@ echo "== 8. URL 路由 /send/不存在 -> 404 =="
 chk "404" 404 "$(req "$ALERT" http://127.0.0.1:18080/send/nobody)"
 
 echo "== 9. 消息体检查(签名/卡片/富文本) =="
-python3 - <<'PY'
+CAP="$CAP" python3 - <<'PY'
 import json,glob,os,sys
-cap="/root/fw_capture"
+cap=os.environ["CAP"]
 def one(prefix):
     f=sorted(glob.glob(os.path.join(cap,prefix+"_*.json")))[0]
     return json.load(open(f))
