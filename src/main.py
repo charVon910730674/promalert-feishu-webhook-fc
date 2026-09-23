@@ -9,8 +9,10 @@
 
 import sys
 import json
+import hashlib
 import logging
 import datetime
+import threading
 
 import arrow
 import requests
@@ -31,6 +33,13 @@ app.config.from_object("config")
 
 BOTS = app.config.get("APP_FS_BOTS") or []
 ROUTE_ALL = app.config.get("APP_FS_ROUTE_ALL", False)
+
+# 同一条告警(相同 labels+status)最多发送的次数; <=0 表示不限制
+MAX_DUPLICATES = int(app.config.get("APP_FS_MAX_DUPLICATES", 2) or 0)
+
+# 告警指纹 -> 已发送次数(进程内存, 重启归零)
+_SEND_COUNTS = {}
+_SEND_COUNTS_LOCK = threading.Lock()
 
 
 @app.before_first_request
@@ -56,6 +65,33 @@ def _fmt_time(value):
         return arrow.get(value).to("Asia/Shanghai").format("YYYY-MM-DD HH:mm:ss")
     except Exception:
         return "-"
+
+
+def _alert_fingerprint(alert):
+    """同一条告警的唯一指纹: labels + status 归一化后取 sha256"""
+    basis = json.dumps(
+        {"labels": alert.get("labels") or {}, "status": alert.get("status", "")},
+        sort_keys=True,
+        ensure_ascii=False,
+    )
+    return hashlib.sha256(basis.encode("utf-8")).hexdigest()
+
+
+def _duplicate_exceeded(alert):
+    """判断该告警是否已超过发送上限; 未超过则计数 +1
+
+    返回 (exceeded, seen_count): exceeded=True 表示应丢弃,
+    seen_count 为本次之前已发送的次数。
+    """
+    if MAX_DUPLICATES <= 0:
+        return False, 0
+    fingerprint = _alert_fingerprint(alert)
+    with _SEND_COUNTS_LOCK:
+        count = _SEND_COUNTS.get(fingerprint, 0)
+        if count >= MAX_DUPLICATES:
+            return True, count
+        _SEND_COUNTS[fingerprint] = count + 1
+        return False, count
 
 
 def _bots_by_name():
@@ -288,7 +324,20 @@ def send(bot_name=None):
     app.logger.info("Receive %d alert(s) from %s", len(alerts), request.remote_addr)
 
     sent = 0
+    skipped = 0
     for alert in alerts:
+        # 同一条告警(相同 labels+status)最多发送 MAX_DUPLICATES 次
+        exceeded, seen = _duplicate_exceeded(alert)
+        if exceeded:
+            alertname = (alert.get("labels") or {}).get("alertname", "unknown")
+            app.logger.info(
+                "Skip duplicated alert '%s' (already sent %d time(s), limit=%d)",
+                alertname,
+                seen,
+                MAX_DUPLICATES,
+            )
+            skipped += 1
+            continue
         label = (alert.get("labels") or {}).get("feishu_bot")
         targets = fixed_target if fixed_target is not None else _select_bots(label)
         # 同一条告警对相同 (alert_type, secret) 只构造一次消息体
@@ -300,7 +349,7 @@ def send(bot_name=None):
             _send_to_bot(bot, cache[key])
             sent += 1
 
-    return jsonify({"status": "ok", "alerts": len(alerts), "sent": sent}), 200
+    return jsonify({"status": "ok", "alerts": len(alerts), "sent": sent, "skipped": skipped}), 200
 
 
 if __name__ == "__main__":

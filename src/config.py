@@ -27,6 +27,8 @@ import json
    - default    : 布尔, 无标签告警默认投递的机器人; 都不填则第一个为默认
    - enabled    : 布尔, false 表示跳过该机器人, 默认 true
 4. APP_FS_ROUTE_ALL=true 时, 每条告警都会广播给所有机器人。
+5. APP_FS_MAX_DUPLICATES: 同一条告警(相同 labels + status)最多发送的次数,
+   超过后直接丢弃不再发送(默认 2; 设为 0 或负数表示不限制)。
 """
 
 
@@ -52,6 +54,12 @@ APP_PORT = os.getenv("APP_PORT", "8080")
 
 # 是否把每条告警广播到所有机器人(默认否, 走标签路由)
 APP_FS_ROUTE_ALL = os.getenv("APP_FS_ROUTE_ALL", "false").lower() in ("1", "true", "yes", "on")
+
+# 同一条告警(相同 labels+status)最多发送的次数, 超过后丢弃; <=0 表示不限制
+try:
+    APP_FS_MAX_DUPLICATES = int(os.getenv("APP_FS_MAX_DUPLICATES", "2"))
+except ValueError:
+    APP_FS_MAX_DUPLICATES = 2
 
 
 def _load_raw_bots():
